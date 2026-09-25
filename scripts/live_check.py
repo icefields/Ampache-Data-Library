@@ -17,8 +17,9 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlencode, urlsplit
 
-from ampachedata import AmpacheClient, InvalidHandshakeError
+from ampachedata import AmpacheClient, InvalidHandshakeError, ObjectType
 from ampachedata.data.db.Database import Database
+from ampachedata.data.db.repositories.CredentialsRepository import CredentialsRepository
 from ampachedata.data.db.repositories.SessionRepository import SessionRepository
 
 USAGE = "usage: python scripts/live_check.py [--keep-session] <path-to-musicdb.db>"
@@ -79,17 +80,17 @@ def _pickArtist(client, artists):
     return artists[0].id, "%s, alphabetical first" % artists[0].name
 
 
-def _fetchRange(url):
-    """GET url with 'Range: bytes=0-1024'. Returns (ok, status, contentType,
-    bytesReceived); ok means HTTP 200 or 206. Reads at most READ_CAP bytes then
-    closes — a 200 response ignores Range and streams the whole file, so the
-    cap is what aborts the body instead of downloading it."""
-    request = urllib.request.Request(url, headers={"Range": "bytes=0-1024"})
+def _fetchRange(url, rangeCap=1024, readCap=READ_CAP):
+    """GET url with 'Range: bytes=0-<rangeCap>'. Returns (ok, status,
+    contentType, bytesReceived); ok means HTTP 200 or 206. Reads at most
+    readCap bytes then closes — a 200 response ignores Range and streams the
+    whole file, so the cap is what aborts the body instead of downloading it."""
+    request = urllib.request.Request(url, headers={"Range": "bytes=0-%d" % rangeCap})
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             status = response.status
             contentType = response.headers.get("Content-Type") or "<none>"
-            data = response.read(READ_CAP)
+            data = response.read(readCap)
             return status in (200, 206), status, contentType, len(data)
     except urllib.error.HTTPError as error:
         return False, error.code, error.headers.get("Content-Type") or "<none>", 0
@@ -100,9 +101,11 @@ def _fetchRange(url):
 
 def _checkMediaUrl(url, action, liveToken, songId):
     """Printed string assertions: the URL must carry these exact fragments.
-    Returns True only if every one is present."""
+    Returns True only if every one is present. BOTH id and filter are required
+    (Nextcloud Music reads id, Ampache reads filter — each backend ignores the
+    parameter it does not know)."""
     allOk = True
-    for fragment in ("action=" + action, liveToken, "filter=" + songId, "type=song", "stats=0"):
+    for fragment in ("action=" + action, liveToken, "id=" + songId, "filter=" + songId, "type=song", "stats=0"):
         ok = fragment in url
         allOk = allOk and ok
         label = "auth=<live token>" if fragment == liveToken else fragment
@@ -741,7 +744,7 @@ def main(argv):
                     not unsourced))
 
     # --- Step 5: media URLs — getStreamUrl / getDownloadUrl + live fetch ---------
-    # Placed BEFORE goodbye: the URLs embed the live session token, which step 6
+    # Placed BEFORE goodbye: the URLs embed the live session token, which step 10
     # destroys (unless --keep-session is passed). The library only BUILDS these
     # URLs (no network call, no DB write) — the GETs below are the script's own
     # verification, not library calls.
@@ -782,7 +785,7 @@ def main(argv):
         # Full URLs for immediate manual player testing — printed BEFORE the
         # fetches and flushed so they are on screen at once (the fetches can
         # be slow). The embedded token is this live session's: it dies with
-        # goodbye in step 6 unless --keep-session was passed — either way the
+        # goodbye in step 10 unless --keep-session was passed — either way the
         # URLs are for immediate manual use only.
         print("    MPV TEST STREAM URL: " + streamUrl, flush=True)
         print("    MPV TEST DOWNLOAD URL: " + downloadUrl, flush=True)
@@ -819,13 +822,58 @@ def main(argv):
                   "%d byte(s) read (cap %d)" % (status, contentType, byteCount, READ_CAP))
             results.append(("/play/ fallback fetchable with live token", fallbackOk))
 
-    # --- Step 5b: flag/rate — interaction tier (mutating writes) ---------------
-    # Placed BEFORE goodbye (step 6): both calls need the live session. The
+    # --- Step 6: user — getUser (current api user) ---------------------------------
+    # Placed before goodbye: getUser needs the live session. Write-through is
+    # unit-test-proven; this step proves it LIVE — the returned user IS the DB
+    # read-back, so its username must match the credentials row (the server
+    # returns the canonical case — compare case-insensitively). artUrl may be an
+    # image.php URL or empty (the account simply has no avatar) — both pass;
+    # only an exception or an empty id is a FAIL.
+    user = client.getUser()
+    print("\n[6] user:", "id=" + user.id, "username=" + user.username,
+          "artUrl=" + user.artUrl)
+    credentials = CredentialsRepository(Database(dbPath)).getCredentials()
+    expectedUsername = credentials.username if credentials else ""
+    results.append(("getUser returned a non-empty id", bool(user.id)))
+    results.append(("getUser username matches credentials (case-insensitive)",
+                    bool(expectedUsername)
+                    and user.username.lower() == expectedUsername.lower()))
+
+    # --- Step 7: get_art — album art URL + live fetch ------------------------------
+    # Reuses an album already fetched in step [4] — never a hardcoded id. The URL
+    # must carry BOTH id and filter (Nextcloud Music reads id, Ampache reads
+    # filter; each backend ignores the parameter it does not know). get_art has
+    # NO stats parameter — nothing to record, no play-count concern; the only
+    # fetch requirement is the small Range-capped read and an image/* reply.
+    if not albums:
+        print("    get_art skipped — no album fetched in step [4]")
+        results.append(("get_art URL carries id+filter+type", False))
+        results.append(("get_art fetchable with image/* Content-Type", False))
+    else:
+        albumRow = albums[0]
+        artUrl = client.getArtUrl(ObjectType.ALBUM, albumRow.id)
+        print("\n[7] get_art url:", artUrl)
+        print("    picked album id %s (%s) — reused from step [4], never hardcoded"
+              % (albumRow.id, albumRow.name))
+        artConstructed = True
+        for fragment in ("id=" + albumRow.id, "filter=" + albumRow.id, "type=album"):
+            ok = fragment in artUrl
+            artConstructed = artConstructed and ok
+            print("    get_art URL contains %-22s %s" % (fragment, "yes" if ok else "NO"))
+        artOk, status, contentType, byteCount = _fetchRange(artUrl, rangeCap=100, readCap=100)
+        isImage = contentType.startswith("image/")
+        print("    GET get_art URL (Range: bytes=0-100): HTTP %s, Content-Type: %s, "
+              "%d byte(s) read (cap 100)" % (status, contentType, byteCount))
+        results.append(("get_art URL carries id+filter+type", artConstructed))
+        results.append(("get_art fetchable with image/* Content-Type", artOk and isImage))
+
+    # --- Step 8: flag/rate — interaction tier (mutating writes) ----------------
+    # Placed BEFORE goodbye (step 10): both calls need the live session. The
     # song id is HARDCODED (MEDIA_SONG_ID) — the same live-verified id as the
     # media step. Test account: the writes are left in place, no state
     # restoration. flag()/rate() re-fetch the song through getSong and verify
     # the read-back themselves — a mismatch raises CacheVerificationError.
-    print("\n[5b] flag/rate — interaction tier (song %s)" % MEDIA_SONG_ID)
+    print("\n[8] flag/rate — interaction tier (song %s)" % MEDIA_SONG_ID)
     flagged = client.flag("song", MEDIA_SONG_ID, True)
     print("    flag read-back: %s" % flagged.flag)
     results.append(("flag applied+verified", flagged.flag is True))
@@ -838,15 +886,15 @@ def main(argv):
     # from the flag() call persisted through the rate() re-fetch.
     print("    fetched entity: flag=%s rating=%s" % (rated.flag, rated.rating))
 
-    # --- Step 5c: session auto-resurrection after expiry (stale token) -----------
-    # Placed BEFORE goodbye (step 6): it needs a live session to kill. The client
+    # --- Step 9: session auto-resurrection after expiry (stale token) ------------
+    # Placed BEFORE goodbye (step 10): it needs a live session to kill. The client
     # keeps NO in-memory token copy — ensureSession() reads SessionEntity fresh on
     # every call — so overwriting the row's auth IS corrupting the client's only
     # token. The dead value keeps valid FORMAT (32 hex) but is wrong, and
     # sessionExpire stays valid, so ensureSession() hands the dead token to the
     # server, the server rejects it (4701), and the client must silently
     # re-handshake from the stored credentials and retry once.
-    print("\n[5c] session auto-resurrection after expiry (stale token)")
+    print("\n[9] session auto-resurrection after expiry (stale token)")
     session = SessionRepository(Database(dbPath)).getSession()
     if session is None or not session.auth:
         print("    skipped — no live session to corrupt")
@@ -872,17 +920,17 @@ def main(argv):
         results.append(("session auto-resurrected after expiry",
                         len(resurrected) > 0 and bool(freshToken) and freshToken != deadToken))
 
-    # --- Step 6: goodbye — session teardown --------------------------------------
+    # --- Step 10: goodbye — session teardown -------------------------------------
     # Placed LAST: it destroys the session, so nothing after it may need auth.
     # --keep-session skips it entirely: the session (and the MPV TEST URLs
     # printed in step 5) stays alive for manual player testing.
     if keepSession:
-        print("\n[6] goodbye — SKIPPED (--keep-session)")
+        print("\n[10] goodbye — SKIPPED (--keep-session)")
         print("    session left alive for manual player testing — the MPV TEST URLs above")
         print("    keep working until the session expires server-side. Run without")
         print("    --keep-session to tear it down.")
     else:
-        print("\n[6] goodbye — session teardown")
+        print("\n[10] goodbye — session teardown")
         goodbyeOk = False
         pingReportsUnauthenticated = False
         authenticatedCallRaises = False
@@ -922,8 +970,8 @@ def main(argv):
         results.append(("goodbye destroyed session",
                         goodbyeOk and pingReportsUnauthenticated and authenticatedCallRaises and sessionGone))
 
-    # --- Step 7: verdict -----------------------------------------------------------
-    print("\n[7] results")
+    # --- Step 11: verdict ----------------------------------------------------------
+    print("\n[11] results")
     allOk = _report(results)
     print("\n" + ("PASS — all checks passed" if allOk else "FAIL — see above"))
     return 0 if allOk else 1
