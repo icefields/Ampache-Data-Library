@@ -210,12 +210,24 @@ All take `(userId=None, username=None, offset=None, limit=None)`.
 |---|---|---|
 | `getStreamUrl(songId, format=None, bitrate=None, offset=None, stats=None)` | `str` | Pure URL builder: no network, no DB write. Song-only per API spec. |
 | `getDownloadUrl(songId, format=None, bitrate=None, stats=None)` | `str` | Same - download flavor. |
+| `getArtUrl(objectType, objectId, size=None)` | `str` | Same - art-image flavor. `objectType` is one of the four `ObjectType` values; `size` is an optional `WxH` string. |
 
 The URLs embed the live session token **as a query parameter** - treat them
 as secrets: don't log them, share them, or paste them into bug reports.
 The library never logs or stores built URLs. Pass `stats=0` for any fetch that is not
 a real user play (preloading, probing, artwork) - otherwise the server records a
 play and pollutes play counts.
+
+Every built URL carries the object UID twice - as both `id` and `filter`:
+Nextcloud Music reads `id` and rejects `filter`-only URLs, Ampache reads
+`filter`, and each backend ignores the parameter it does not know
+(backend-developer-confirmed), so both ride for maximal compatibility.
+
+`getArtUrl(objectType, objectId, size=None)` builds the art-image URL for one
+library object - pure URL construction: no network call, no DB write, nothing
+persisted. `objectType` is one of the four `ObjectType` values (`"song"`,
+`"album"`, `"artist"`, `"playlist"`); `size` is an optional `WxH` string such
+as `"640x480"`, appended only when set.
 
 ### Interactions (mutate server state)
 

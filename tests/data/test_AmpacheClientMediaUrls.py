@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
-from ampachedata import AmpacheClient, Credentials, InvalidHandshakeError
+from ampachedata import AmpacheClient, Credentials, InvalidHandshakeError, ObjectType
 from ampachedata.data.auth.SessionManager import SessionManager
 
 SERVER_URL = "https://demo.ampache.dev"
@@ -63,14 +63,14 @@ def _params(url):
 def testStreamUrlExactParams():
     client = _makeClient(_FakeSession(TOKEN_A))
     params = _params(client.getStreamUrl("132"))
-    assert params == {"action": "stream", "auth": TOKEN_A, "filter": "132", "type": "song"}
+    assert params == {"action": "stream", "auth": TOKEN_A, "id": "132", "filter": "132", "type": "song"}
 
 
 def testStreamUrlAppendsOptionalParamsOnlyWhenSet():
     client = _makeClient(_FakeSession(TOKEN_A))
     params = _params(client.getStreamUrl("132", format="raw", bitrate=192000, offset=60, stats=0))
     assert params == {
-        "action": "stream", "auth": TOKEN_A, "filter": "132", "type": "song",
+        "action": "stream", "auth": TOKEN_A, "id": "132", "filter": "132", "type": "song",
         "format": "raw", "bitrate": "192000", "offset": "60", "stats": "0",
         # stats=0 proves falsy-but-not-None values ARE appended
     }
@@ -79,14 +79,14 @@ def testStreamUrlAppendsOptionalParamsOnlyWhenSet():
 def testDownloadUrlExactParams():
     client = _makeClient(_FakeSession(TOKEN_A))
     params = _params(client.getDownloadUrl("132"))
-    assert params == {"action": "download", "auth": TOKEN_A, "filter": "132", "type": "song"}
+    assert params == {"action": "download", "auth": TOKEN_A, "id": "132", "filter": "132", "type": "song"}
 
 
 def testDownloadUrlAppendsOptionalParamsOnlyWhenSet():
     client = _makeClient(_FakeSession(TOKEN_A))
     params = _params(client.getDownloadUrl("132", format="mp3", bitrate=192000, stats=1))
     assert params == {
-        "action": "download", "auth": TOKEN_A, "filter": "132", "type": "song",
+        "action": "download", "auth": TOKEN_A, "id": "132", "filter": "132", "type": "song",
         "format": "mp3", "bitrate": "192000", "stats": "1",
     }
 
@@ -108,3 +108,32 @@ def testTerminatedSessionRaises():
         client.getStreamUrl("132")
     with pytest.raises(InvalidHandshakeError):
         client.getDownloadUrl("132")
+
+
+def testArtUrlExactParamsBothIdAndFilter():
+    client = _makeClient(_FakeSession(TOKEN_A))
+    params = _params(client.getArtUrl(ObjectType.ALBUM, "12"))
+    assert params == {
+        "action": "get_art", "auth": TOKEN_A, "id": "12", "filter": "12", "type": "album",
+    }
+
+
+def testArtUrlAppendsSizeOnlyWhenSet():
+    client = _makeClient(_FakeSession(TOKEN_A))
+    withoutSize = _params(client.getArtUrl(ObjectType.ARTIST, "7"))
+    withSize = _params(client.getArtUrl(ObjectType.ARTIST, "7", size="640x480"))
+    assert "size" not in withoutSize
+    assert withSize["size"] == "640x480"
+
+
+def testArtUrlSongAndPlaylistTypes():
+    client = _makeClient(_FakeSession(TOKEN_A))
+    assert _params(client.getArtUrl(ObjectType.SONG, "5"))["type"] == "song"
+    assert _params(client.getArtUrl(ObjectType.PLAYLIST, "9"))["type"] == "playlist"
+
+
+def testArtUrlTerminatedSessionRaises():
+    client = _makeClient(_FakeSession(TOKEN_A))
+    client._sessionManager.terminate()
+    with pytest.raises(InvalidHandshakeError):
+        client.getArtUrl(ObjectType.ALBUM, "12")
