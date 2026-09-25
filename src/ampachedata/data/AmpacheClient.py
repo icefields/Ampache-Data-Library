@@ -14,6 +14,7 @@ from ..domain.OperationResult import OperationResult
 from ..domain.PingResult import PingResult
 from ..domain.Playlist import Playlist
 from ..domain.Song import Song
+from ..domain.User import User
 from .ApiMethod import ApiMethod
 from .ErrorCode import ErrorCode
 from .ObjectType import ObjectType
@@ -28,6 +29,7 @@ from .db.mappers.PlaylistMapper import mapPlaylist
 from .db.mappers.PlaylistSongMapper import mapPlaylistSong
 from .db.mappers.SessionMapper import mapSession
 from .db.mappers.SongMapper import mapSong
+from .db.mappers.UserMapper import mapUser
 from .db.repositories.AlbumRepository import AlbumRepository
 from .db.repositories.ArtistRepository import ArtistRepository
 from .db.repositories.CredentialsRepository import CredentialsRepository
@@ -36,6 +38,7 @@ from .db.repositories.PlaylistRepository import PlaylistRepository
 from .db.repositories.PlaylistSongRepository import PlaylistSongRepository
 from .db.repositories.SessionRepository import SessionRepository
 from .db.repositories.SongRepository import SongRepository
+from .db.repositories.UserRepository import UserRepository
 from .errors import AmpacheError, CacheVerificationError, InvalidHandshakeError, raiseForError
 
 
@@ -58,6 +61,7 @@ class AmpacheClient:
         self._historyRepository = HistoryRepository(self._database)
         self._playlistRepository = PlaylistRepository(self._database)
         self._playlistSongRepository = PlaylistSongRepository(self._database)
+        self._userRepository = UserRepository(self._database)
         self._lastPayload = None
 
     @property
@@ -687,6 +691,24 @@ class AmpacheClient:
             self._historyRepository.upsertHistories(historyRows)
             self._playlistSongRepository.upsertPlaylistSongs(playlistSongRows)
         return self._songRepository.getPlaylistSongs(playlistId)
+
+    def getUser(self, username=None) -> User:
+        """user: write-through for one user object. Omitting username
+        returns the CURRENT api user's public information (spec); passing
+        it asks for that user (the API user needs appropriate access).
+        fetch -> map -> upsert -> read back from the DB only.
+
+        The response's `auth` field is a LIVE SESSION TOKEN and is
+        deliberately dropped by the mapper — it is never persisted
+        outside SessionEntity. Envelope: a single object, no list."""
+        params = self._listParams(username=username)
+        payload = self._sendWithAuth(ApiMethod.USER, params)
+        row = mapUser(payload)
+        self._userRepository.upsertUsers([row])
+        user = self._userRepository.getUser(row["id"])
+        if user is None:
+            raise AmpacheError("user " + row["id"] + " missing from DB after write-through")
+        return user
 
     def getStreamUrl(self, songId, format=None, bitrate=None, offset=None, stats=None) -> str:
         """stream: build the playback URL for one song. NO network call, NO DB

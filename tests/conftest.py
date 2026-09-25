@@ -129,6 +129,11 @@ def playlistSongsPayload():
 
 
 @pytest.fixture
+def userPayload():
+    return json.loads((EXAMPLES_DIR / "user.json").read_text(encoding="utf-8"))
+
+
+@pytest.fixture
 def statsSongPayload():
     return json.loads((EXAMPLES_DIR / "stats_song.json").read_text(encoding="utf-8"))
 

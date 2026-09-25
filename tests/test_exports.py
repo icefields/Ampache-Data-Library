@@ -13,5 +13,6 @@ def testPublicApiExportsResolve():
         "AlbumRepository",
         "SongRepository",
         "PlaylistRepository",
+        "UserRepository",
     ):
         assert name in ampachedata.__all__

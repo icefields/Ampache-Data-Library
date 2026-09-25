@@ -26,3 +26,4 @@ class ApiMethod(str, Enum):
     GET_ART = "get_art"
     FLAG = "flag"
     RATE = "rate"
+    USER = "user"
